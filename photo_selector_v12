@@ -1,0 +1,107 @@
+#03/26/2026 Photo Selector Version 12 
+#Author: RLS & Factory AI Droids
+#Combines v9 interactive crop tool + v10 report generator
+
+import os
+import shutil
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+from PIL import Image, ImageTk
+
+# Check for python-docx
+try:
+    from docx import Document
+    from docx.shared import Inches
+    DOCX_AVAILABLE = True
+except ImportError:
+    DOCX_AVAILABLE = False
+
+class App:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Photo Selector & Report Generator v12")
+        self.root.geometry("1400x850")
+        self.photos, self.thumbs, self.checks = [], {}, {}
+        self.preview_img, self.zoom_level, self.original_image = None, 1.0, None
+        self.pan_x, self.pan_y = 0, 0
+        self.selected_for_rename, self.output_folder, self.current_rename_index = [], "", 0
+        self.current_photo_path = None
+        self.renamed_photos = []
+        
+        # Crop tool state
+        self.crop_mode = False
+        self.crop_rect = None
+        self.crop_handles = []
+        self.crop_start = None
+        self.active_handle = None
+        self.crop_coords = [50, 50, 200, 200]
+        
+        # Top frame
+        top = ttk.Frame(root, padding=10)
+        top.pack(fill=tk.X)
+        ttk.Label(top, text="Boring ID:").pack(side=tk.LEFT)
+        self.vb_id = tk.StringVar()
+        ttk.Entry(top, textvariable=self.vb_id, width=15).pack(side=tk.LEFT, padx=(5,20))
+        ttk.Label(top, text="Folder:").pack(side=tk.LEFT)
+        self.path = tk.StringVar()
+        ttk.Entry(top, textvariable=self.path, width=40).pack(side=tk.LEFT, padx=5)
+        ttk.Button(top, text="Browse", command=self.browse).pack(side=tk.LEFT)
+        ttk.Button(top, text="Load", command=self.load).pack(side=tk.LEFT, padx=5)
+        ttk.Button(top, text="Select All", command=self.sel_all).pack(side=tk.LEFT, padx=10)
+        ttk.Button(top, text="Clear All", command=self.clr_all).pack(side=tk.LEFT)
+        
+        # Main frame
+        main = ttk.Frame(root)
+        main.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # Left - photo grid
+        left = ttk.LabelFrame(main, text="Photos - Click to Preview", padding=5)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.canvas = tk.Canvas(left, bg="white")
+        self.canvas.pack(fill=tk.BOTH, expand=True)
+        self.inner = ttk.Frame(self.canvas)
+        self.canvas.create_window((0,0), window=self.inner, anchor=tk.NW)
+        
+        # Right panel
+        right = ttk.Frame(main, width=420)
+        right.pack(side=tk.RIGHT, fill=tk.Y, padx=(10,0))
+        right.pack_propagate(False)
+        
+        # Preview
+        pf = ttk.LabelFrame(right, text="Preview", padding=5)
+        pf.pack(fill=tk.BOTH, expand=True)
+        self.pcv = tk.Canvas(pf, bg="#e0e0e0", width=380, height=280)
+        self.pcv.pack(fill=tk.BOTH, expand=True)
+        
+        # Zoom buttons
+        zf = ttk.Frame(pf)
+        zf.pack(fill=tk.X, pady=3)
+        ttk.Button(zf, text="Zoom +", command=self.zoom_in).pack(side=tk.LEFT, padx=3)
+        ttk.Button(zf, text="Zoom -", command=self.zoom_out).pack(side=tk.LEFT, padx=3)
+        ttk.Button(zf, text="Reset", command=self.zoom_reset).pack(side=tk.LEFT, padx=3)
+        self.crop_btn = ttk.Button(zf, text="Crop", command=self.toggle_crop_mode)
+        self.crop_btn.pack(side=tk.LEFT, padx=10)
+        
+        # Crop controls (hidden until crop mode)
+        self.crop_frame = ttk.Frame(pf)
+        self.apply_crop_btn = ttk.Button(self.crop_frame, text="Apply Crop", command=self.apply_crop)
+        self.apply_crop_btn.pack(side=tk.LEFT, padx=3)
+        self.cancel_crop_btn = ttk.Button(self.crop_frame, text="Cancel", command=self.cancel_crop)
+        self.cancel_crop_btn.pack(side=tk.LEFT, padx=3)
+        
+        # Pan buttons
+        pnf = ttk.Frame(pf)
+        pnf.pack(fill=tk.X, pady=3)
+        ttk.Button(pnf, text="Up", width=5, command=self.pan_up).pack(side=tk.LEFT, padx=2)
+        ttk.Button(pnf, text="Down", width=5, command=self.pan_down).pack(side=tk.LEFT, padx=2)
+        ttk.Button(pnf, text="Left", width=5, command=self.pan_left).pack(side=tk.LEFT, padx=2)
+        ttk.Button(pnf, text="Right", width=5, command=self.pan_right).pack(side=tk.LEFT, padx=2)
+        
+        # Info
+        inf = ttk.LabelFrame(right, text="Properties", padding=5)
+        inf.pack(fill=tk.X, pady=(5,0))
+        self.lbl_n = ttk.Label(inf, text="Name: -")
+        self.lbl_n.pack(anchor=tk.W)
+        self.lbl_s = ttk.Label(inf, text="Size: -")
+        self.lbl_s.pack(anchor=tk.W)
+        self.lbl_f = ttk.
