@@ -24,3 +24,4 @@ Option 4: Reference this session ID
 
 Note the session URL or ID from your browser
 You can reference it when starting a new session
+https://app.factory.ai/sessions/abf6e190-887e-48a5-be79-aaacd6d41288
