@@ -19,3 +19,8 @@ https://github.com/CubanCongaMan/factory-files
 
 ## Key Command to Fetch Code
 https://raw.githubusercontent.com/CubanCongaMan/factory-files/master/Photo_Selector_V24.py
+
+Option 4: Reference this session ID
+
+Note the session URL or ID from your browser
+You can reference it when starting a new session
