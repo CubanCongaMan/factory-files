@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-# 04/01/2026 Photo Selector Version 26 Rev 07
+# 04/06/2026 Photo Selector Version 26 Rev 15
 #Fix: Restored filenames below photos in Tab 2 preview
 #Fix: Full filenames in Tab 2 left panel
 #Fix: Tooltip on hover for Tab 1 thumbnails
 #Fix: Added "Add Page" button for additional pages
 #Author: RLS & Factory AI Droids
 
-import os, shutil, re, json, urllib.parse, urllib.request, tkinter as tk
-from tkinter import filedialog, messagebox
+import os, shutil, re, json, zipfile, urllib.parse, urllib.request, tkinter as tk
+from tkinter import filedialog, messagebox, simpledialog
 from PIL import Image, ImageTk
 
 def normalize_supabase_url(raw_url):
@@ -76,7 +76,7 @@ class ToolTip:
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("Photo Selector v26")
+        root.title("Photo Selector v26 Rev 15")
         root.geometry("1400x900")
         
         self.bg_color = "#1a2942"
@@ -91,6 +91,7 @@ class App:
         self.crop_mode, self.crop_coords, self.crop_start, self.active_handle = False, [50,50,200,200], None, None
         self.vb_id = tk.StringVar()
         self.path = tk.StringVar()
+        self.supabase_key_cache = SUPABASE_KEY
         
         self.sorted_images = []
         self.preview_checks = {}
@@ -124,7 +125,7 @@ class App:
                                font=('Arial', 16, 'bold'), bg=self.accent_color, fg=self.fg_color)
         title_label.pack(side=tk.LEFT, padx=20, pady=10)
         
-        version_label = tk.Label(header, text="v26.07", font=('Arial', 10), 
+        version_label = tk.Label(header, text="v26.15", font=('Arial', 10), 
                                   bg=self.accent_color, fg="#aabbcc")
         version_label.pack(side=tk.RIGHT, padx=20, pady=15)
         
@@ -426,18 +427,7 @@ class App:
         if not folder:
             return
         self.templates_folder.set(folder)
-        self.templates = {}
-        for f in os.listdir(folder):
-            if f.lower().endswith('.docx'):
-                fl = f.lower()
-                if 'template_no_01' in fl or 'template_01' in fl:
-                    self.templates[1] = os.path.join(folder, f)
-                elif 'template_no_02' in fl or 'template_02' in fl:
-                    self.templates[2] = os.path.join(folder, f)
-                elif 'template_no_03' in fl or 'template_03' in fl:
-                    self.templates[3] = os.path.join(folder, f)
-                elif 'template_no_04' in fl or 'template_04' in fl:
-                    self.templates[4] = os.path.join(folder, f)
+        self.templates = self.scan_templates_folder(folder)
         found = len(self.templates)
         if found == 4:
             self.template_status.config(text="All 4 templates loaded", fg='#4CAF50')
@@ -446,6 +436,52 @@ class App:
             self.template_status.config(text=f"Found {found}/4. Missing: {', '.join(missing)}", fg='#ff9800')
         else:
             self.template_status.config(text="No templates found", fg='#f44336')
+
+    def scan_templates_folder(self, folder):
+        templates = {}
+        if not folder or not os.path.isdir(folder):
+            return templates
+
+        def template_slot(filename):
+            fl = filename.lower().replace(' ', '')
+            # Handle common OCR/typing variants where O is used instead of 0.
+            variants = {
+                'template_no_o1': 'template_no_01',
+                'template_no_o2': 'template_no_02',
+                'template_no_o3': 'template_no_03',
+                'template_no_o4': 'template_no_04',
+                'template_o1': 'template_01',
+                'template_o2': 'template_02',
+                'template_o3': 'template_03',
+                'template_o4': 'template_04',
+            }
+            for bad, good in variants.items():
+                fl = fl.replace(bad, good)
+            if 'template_no_01' in fl or 'template_01' in fl:
+                return 1
+            if 'template_no_02' in fl or 'template_02' in fl:
+                return 2
+            if 'template_no_03' in fl or 'template_03' in fl:
+                return 3
+            if 'template_no_04' in fl or 'template_04' in fl:
+                return 4
+            return None
+
+        for f in os.listdir(folder):
+            fl = f.lower()
+            if not (fl.endswith('.docx') or fl.endswith('.doc')):
+                continue
+            slot = template_slot(f)
+            if slot is None:
+                continue
+            candidate = os.path.join(folder, f)
+            # If a .doc was selected but a same-name .docx exists, prefer .docx automatically.
+            if fl.endswith('.doc'):
+                alt_docx = os.path.splitext(candidate)[0] + '.docx'
+                if os.path.isfile(alt_docx):
+                    candidate = alt_docx
+            templates[slot] = candidate
+        return templates
 
     def on_template_select(self, event=None):
         if not self.pages:
@@ -1045,10 +1081,56 @@ class App:
         if not DOCX_OK:
             messagebox.showerror("Error", "python-docx not installed.")
             return
+        # Re-scan folder to avoid stale template paths (moved/renamed files, OneDrive sync changes, etc.)
+        folder = self.templates_folder.get().strip()
+        if folder:
+            self.templates = self.scan_templates_folder(folder)
+
         needed = set(self.get_page_template(i) for i in range(len(self.pages)))
         missing = [str(t) for t in needed if t not in self.templates]
         if missing:
             messagebox.showerror("Error", f"Missing template(s): {', '.join(missing)}")
+            return
+        missing_paths = [self.templates[t] for t in needed if not os.path.isfile(self.templates.get(t, ''))]
+        if missing_paths:
+            msg = "Template file not found. Re-upload template folder.\n\n"
+            msg += "\n".join(missing_paths[:3])
+            if len(missing_paths) > 3:
+                msg += "\n..."
+            messagebox.showerror("Error", msg)
+            return
+        unreadable_templates = []
+        invalid_templates = []
+        for t in sorted(needed):
+            template_path = self.templates.get(t, '')
+            if not (template_path and os.path.isfile(template_path)):
+                continue
+            try:
+                with open(template_path, 'rb') as fh:
+                    fh.read(4)
+            except PermissionError:
+                unreadable_templates.append((t, template_path, 'Permission denied (file may be locked by Word/OneDrive or blocked by permissions).'))
+                continue
+            except OSError as e:
+                unreadable_templates.append((t, template_path, f'OS error: {e}'))
+                continue
+            if not zipfile.is_zipfile(template_path):
+                invalid_templates.append((t, template_path))
+        if unreadable_templates:
+            msg = "Template file cannot be read.\n"
+            msg += "Close any open Word template files, ensure OneDrive sync is complete, and check file permissions.\n\n"
+            msg += "\n".join([f"Template {t}: {p}\nReason: {r}" for t, p, r in unreadable_templates[:2]])
+            if len(unreadable_templates) > 2:
+                msg += "\n..."
+            messagebox.showerror("Error", msg)
+            return
+        if invalid_templates:
+            msg = "Template file is not a valid .docx package.\n"
+            msg += "Use Word template files saved as .docx (not .doc).\n\n"
+            msg += "\n".join([f"Template {t}: {p}" for t, p in invalid_templates[:3]])
+            if len(invalid_templates) > 3:
+                msg += "\n..."
+            messagebox.showerror("Error", msg)
             return
         vid = self.vb_id.get().strip() or "Unknown"
         template_values = self.get_template_values(vid)
@@ -1056,6 +1138,13 @@ class App:
             return
         op = filedialog.asksaveasfilename(defaultextension=".docx", filetypes=[("Word","*.docx")], title="Save Report As")
         if not op:
+            return
+        if not op.lower().endswith('.docx'):
+            op += '.docx'
+        op_abs = os.path.abspath(op)
+        template_paths = {os.path.abspath(p) for p in self.templates.values()}
+        if op_abs in template_paths:
+            messagebox.showerror("Error", "Output filename cannot be the same as a template file. Choose a new report filename.")
             return
         mismatch_messages = []
         for idx, page in enumerate(self.pages):
@@ -1074,15 +1163,18 @@ class App:
         try:
             first_tpl = self.get_page_template(0)
             master = Document(self.templates[first_tpl])
-            self.fill_template_page(master, self.pages[0], first_tpl, template_values)
+            total_replaced_cells = self.fill_template_page(master, self.pages[0], first_tpl, template_values)
             composer = Composer(master)
             for idx in range(1, len(self.pages)):
                 tpl = self.get_page_template(idx)
                 page_doc = Document(self.templates[tpl])
-                self.fill_template_page(page_doc, self.pages[idx], tpl, template_values)
+                total_replaced_cells += self.fill_template_page(page_doc, self.pages[idx], tpl, template_values)
                 composer.append(page_doc)
+            if total_replaced_cells == 0:
+                messagebox.showerror("Supabase", "No Supabase placeholders were replaced in table 2. Check placeholder names and Boring ID data.")
+                return
             composer.save(op)
-            messagebox.showinfo("Success", f"Report saved with {len(self.pages)} pages!")
+            messagebox.showinfo("Success", f"Report saved with {len(self.pages)} pages. Supabase fields updated in {total_replaced_cells} header cells.")
         except Exception as e:
             messagebox.showerror("Error", f"Failed: {str(e)}")
 
@@ -1440,15 +1532,72 @@ class App:
         """Generate the final report from the Final Report Preview tab"""
         self.gen_report_from_preview()
 
+    def load_local_supabase_settings(self):
+        settings_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'supabase_settings.json')
+        if not os.path.isfile(settings_path):
+            return {}
+        try:
+            with open(settings_path, 'r', encoding='utf-8') as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                return data
+            messagebox.showwarning("Supabase", "supabase_settings.json must contain a JSON object.")
+            return {}
+        except Exception as e:
+            messagebox.showwarning("Supabase", f"Could not read supabase_settings.json: {str(e)}")
+            return {}
+
+    def get_supabase_settings(self):
+        local = self.load_local_supabase_settings()
+        url = normalize_supabase_url(
+            os.environ.get('SUPABASE_URL', '') or
+            os.environ.get('SUPABASE_PROJECT_URL', '') or
+            str(local.get('url') or local.get('SUPABASE_URL') or '').strip() or
+            SUPABASE_URL
+        )
+        key = os.environ.get('SUPABASE_KEY', '').strip() or str(local.get('key') or local.get('SUPABASE_KEY') or '').strip() or self.supabase_key_cache
+        table = os.environ.get('SUPABASE_TABLE', '').strip() or str(local.get('table') or local.get('SUPABASE_TABLE') or '').strip() or SUPABASE_TABLE
+        id_column = os.environ.get('SUPABASE_ID_COLUMN', '').strip() or str(local.get('id_column') or local.get('SUPABASE_ID_COLUMN') or '').strip() or SUPABASE_ID_COLUMN
+
+        if not key:
+            key = simpledialog.askstring(
+                "Supabase Key",
+                "Enter SUPABASE_KEY for this session:",
+                show='*',
+                parent=self.root
+            )
+            if key:
+                key = key.strip()
+                self.supabase_key_cache = key
+                os.environ['SUPABASE_KEY'] = key
+
+        return {
+            'url': url,
+            'key': key,
+            'table': table,
+            'id_column': id_column,
+        }
+
     def get_template_values(self, vb_id):
         values = {'vb_id_txt': vb_id}
-        if not (SUPABASE_URL and SUPABASE_KEY and SUPABASE_TABLE and vb_id):
-            return values
+        settings = self.get_supabase_settings()
+        if not vb_id:
+            messagebox.showerror("Supabase", "Boring ID is required to fetch Supabase data.")
+            return None
+        if not settings['url']:
+            messagebox.showerror("Supabase", "SUPABASE_URL is missing.")
+            return None
+        if not settings['key']:
+            messagebox.showerror("Supabase", "SUPABASE_KEY is missing. Set it before generating the report.")
+            return None
+        if not settings['table']:
+            messagebox.showerror("Supabase", "SUPABASE_TABLE is missing.")
+            return None
         try:
-            record = self.fetch_supabase_record(vb_id)
+            record = self.fetch_supabase_record(vb_id, settings)
             if not record:
-                messagebox.showwarning("Supabase", f"No row found for {SUPABASE_ID_COLUMN} = {vb_id}. Using local defaults.")
-                return values
+                messagebox.showerror("Supabase", f"No row found for {settings['id_column']} = {vb_id} in table {settings['table']}.")
+                return None
             for key, val in record.items():
                 values[str(key)] = '' if val is None else str(val)
             return values
@@ -1456,17 +1605,17 @@ class App:
             messagebox.showerror("Supabase", f"Failed to load Supabase row: {str(e)}")
             return None
 
-    def fetch_supabase_record(self, vb_id):
-        base = SUPABASE_URL.rstrip('/')
-        table = urllib.parse.quote(SUPABASE_TABLE, safe='._-')
-        id_col = urllib.parse.quote(SUPABASE_ID_COLUMN, safe='._-')
+    def fetch_supabase_record(self, vb_id, settings):
+        base = settings['url'].rstrip('/')
+        table = urllib.parse.quote(settings['table'], safe='._-')
+        id_col = urllib.parse.quote(settings['id_column'], safe='._-')
         id_val = urllib.parse.quote(str(vb_id), safe='')
         url = f"{base}/rest/v1/{table}?select=*&{id_col}=eq.{id_val}&limit=1"
         req = urllib.request.Request(
             url,
             headers={
-                'apikey': SUPABASE_KEY,
-                'Authorization': f'Bearer {SUPABASE_KEY}',
+                'apikey': settings['key'],
+                'Authorization': f"Bearer {settings['key']}",
                 'Accept': 'application/json'
             }
         )
@@ -1488,12 +1637,16 @@ class App:
         return updated
 
     def fill_template_page(self, doc, page, tpl_num, template_values):
+        replaced_cells = 0
         tables_to_update = [doc.tables[1]] if len(doc.tables) >= 2 else list(doc.tables)
         for t in tables_to_update:
             for row in t.rows:
                 for cell in row.cells:
                     if cell.text:
+                        original = cell.text
                         cell.text = self.apply_template_values(cell.text, template_values)
+                        if cell.text != original:
+                            replaced_cells += 1
                         for paragraph in cell.paragraphs:
                             for run in paragraph.runs:
                                 run.font.size = Pt(9)
@@ -1531,6 +1684,7 @@ class App:
                 ins_img(doc.tables[2].rows[3].cells[0], closeups[2], 1.8)
             if len(closeups) >= 4 and len(doc.tables[2].rows[3].cells) >= 2:
                 ins_img(doc.tables[2].rows[3].cells[1], closeups[3], 1.8)
+        return replaced_cells
 
     def browse(self):
         f = filedialog.askdirectory()
